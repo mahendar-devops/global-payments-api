@@ -1,0 +1,129 @@
+# observability/alertmanager.yml
+#
+# AlertManager routing configuration.
+# Determines WHERE alerts go based on severity and team labels.
+#
+# Route hierarchy:
+#   CRITICAL → PagerDuty (pages on-call engineer) + Slack #alerts-critical
+#   WARNING  → Slack #alerts-warnings only
+#   Finance alerts → Slack #payments-finance-ops channel
+#
+# Secrets (PagerDuty key, Slack webhook URL) are injected via
+# Kubernetes Secret at deploy time — never stored in this file.
+
+global:
+  # Default: resolve an alert if it hasn't fired again in 5 minutes
+  resolve_timeout: 5m
+  # SMTP for email fallback (optional)
+  smtp_smarthost: 'smtp.bank.internal:587'
+  smtp_from: 'alertmanager@globalpayments.com'
+
+# ── Notification templates ──────────────────────────────────────
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# ── Routing tree ────────────────────────────────────────────────
+route:
+  # Default receiver if no child route matches
+  receiver: slack-warnings
+
+  # Group alerts that share the same alertname + namespace
+  # to avoid alert storms (e.g. 10 pods crashing → 1 grouped alert)
+  group_by: ['alertname', 'namespace', 'service']
+  group_wait:      30s    # Wait 30s before sending the first notification
+  group_interval:  5m     # Wait 5m before sending updates for a firing group
+  repeat_interval: 4h     # Re-notify every 4h if alert is still firing
+
+  routes:
+    # ── CRITICAL → PagerDuty + Slack ──────────────────────────
+    - match:
+        severity: critical
+      receiver: pagerduty-critical
+      continue: true        # Also send to Slack after PagerDuty
+
+    - match:
+        severity: critical
+      receiver: slack-critical
+
+    # ── Finance team alerts ────────────────────────────────────
+    - match:
+        team: payments-finance
+      receiver: slack-finance
+      # Finance alerts go to a dedicated channel regardless of severity
+      group_by: ['alertname', 'run_id']
+      group_wait: 0s        # Immediate — reconciliation failures are time-sensitive
+
+    # ── WARNING → Slack warnings channel ─────────────────────
+    - match:
+        severity: warning
+      receiver: slack-warnings
+
+# ── Inhibition rules ────────────────────────────────────────────
+# Suppress child alerts when a parent is already firing.
+# e.g. If the whole deployment is down, don't also page for high error rate.
+inhibit_rules:
+  - source_match:
+      alertname: PaymentsPodCrashLooping
+    target_match:
+      alertname: PaymentServiceHighErrorRate
+    equal: ['namespace']
+
+  - source_match:
+      alertname: GatewayCircuitBreakerOpen
+    target_match:
+      alertname: PaymentServiceHighP99Latency
+    equal: ['namespace']
+
+# ── Receivers ───────────────────────────────────────────────────
+receivers:
+
+  - name: pagerduty-critical
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_SERVICE_KEY}'  # Injected from K8s Secret
+        description: '{{ .CommonAnnotations.summary }}'
+        details:
+          runbook: '{{ .CommonAnnotations.runbook_url }}'
+          description: '{{ .CommonAnnotations.description }}'
+          firing_alerts: '{{ .Alerts.Firing | len }}'
+
+  - name: slack-critical
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_CRITICAL}'  # Injected from K8s Secret
+        channel: '#alerts-payments-critical'
+        username: 'AlertManager'
+        icon_emoji: ':fire:'
+        color: 'danger'
+        title: '🚨 CRITICAL: {{ .CommonAnnotations.summary }}'
+        text: |
+          *Alert:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ .CommonAnnotations.description }}
+          *Runbook:* {{ .CommonAnnotations.runbook_url }}
+          *Started:* {{ .CommonLabels.alertname }} @ {{ .Alerts.Firing | len }} firing
+        send_resolved: true
+
+  - name: slack-warnings
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_WARNINGS}'
+        channel: '#alerts-payments-warnings'
+        username: 'AlertManager'
+        icon_emoji: ':warning:'
+        color: 'warning'
+        title: '⚠️ WARNING: {{ .CommonAnnotations.summary }}'
+        text: |
+          *Alert:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ .CommonAnnotations.description }}
+        send_resolved: true
+
+  - name: slack-finance
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_FINANCE}'
+        channel: '#payments-finance-ops'
+        username: 'Payments Ops Bot'
+        icon_emoji: ':bank:'
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+        title: '{{ if eq .Status "firing" }}🔴{{ else }}✅{{ end }} Reconciliation Alert'
+        text: |
+          *{{ .CommonAnnotations.summary }}*
+          {{ .CommonAnnotations.description }}
+          {{ if .CommonAnnotations.runbook_url }}*Runbook:* {{ .CommonAnnotations.runbook_url }}{{ end }}
+        send_resolved: true

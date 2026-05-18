@@ -1,0 +1,249 @@
+# ─────────────────────────────────────────────────────────────────
+# payments-service — Kubernetes Manifests
+# Namespace: payments
+# ─────────────────────────────────────────────────────────────────
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-service
+  namespace: payments
+  labels:
+    app: payments-service
+    version: "1.0.0"
+    tier: backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payments-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0      # Zero-downtime: never reduce below desired count
+      maxSurge: 1            # Allow 1 extra pod during rollout
+  template:
+    metadata:
+      labels:
+        app: payments-service
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8080"
+    spec:
+      serviceAccountName: payments-service-sa  # IRSA-annotated SA
+
+      # Spread pods across AZs for HA
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: payments-service
+
+      # Graceful shutdown — allow 30s for in-flight requests
+      terminationGracePeriodSeconds: 60
+
+      containers:
+        - name: payments-service
+          image: 123456789.dkr.ecr.eu-west-2.amazonaws.com/payments-service:IMAGE_TAG
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+
+          env:
+            - name: SERVER_PORT
+              value: "8080"
+            - name: ENVIRONMENT
+              value: "production"
+            - name: SPRING_PROFILES_ACTIVE
+              value: "production"
+            # DB credentials from Secrets Manager via CSI Driver (mounted as files)
+            # Spring reads these via environment variables
+            - name: DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: payments-db-secret
+                  key: db-url
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: payments-db-secret
+                  key: db-username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: payments-db-secret
+                  key: db-password
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: payments-jwt-secret
+                  key: jwt-secret
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: payments-config
+                  key: kafka-bootstrap-servers
+
+          # Resource requests and limits — right-sized for m5.xlarge node
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+
+          # Startup probe — give Spring Boot time to start up
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            failureThreshold: 30     # 30 × 10s = 5 minutes max startup time
+            periodSeconds: 10
+
+          # Liveness probe — restart pod if stuck
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 0   # startupProbe guards initial period
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # Readiness probe — remove from service if not ready to serve traffic
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # Graceful shutdown support
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 15"]  # Allow LB to drain
+
+          # Security hardening
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp              # Spring needs /tmp for working files
+
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+
+      # Do not allow pods to be scheduled on the same node (soft preference)
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: payments-service
+                topologyKey: kubernetes.io/hostname
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-service
+  namespace: payments
+  labels:
+    app: payments-service
+spec:
+  type: ClusterIP          # Internal only — exposed via Ingress
+  selector:
+    app: payments-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+
+---
+# Horizontal Pod Autoscaler — scale on CPU utilisation
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payments-service-hpa
+  namespace: payments
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payments-service
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60    # Scale out at 60% — headroom before new pods ready
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300   # Don't scale down for 5 min after spike
+
+---
+# PodDisruptionBudget — guarantees service availability during node drains
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payments-service-pdb
+  namespace: payments
+spec:
+  minAvailable: 2          # At least 2 pods must be running at all times
+  selector:
+    matchLabels:
+      app: payments-service
+
+---
+# ConfigMap — non-sensitive configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payments-config
+  namespace: payments
+data:
+  kafka-bootstrap-servers: "kafka-headless.kafka.svc.cluster.local:9092"
+  log-level: "INFO"
+  trace-sample-rate: "0.1"
+
+---
+# ServiceAccount — annotated for IRSA
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payments-service-sa
+  namespace: payments
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789:role/payments-service-role"

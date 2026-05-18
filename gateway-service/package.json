@@ -1,0 +1,56 @@
+{
+  "name": "gateway-service",
+  "version": "1.0.0",
+  "description": "API Gateway — Global Payments API (Node.js/Express)",
+  "main": "src/app.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start":      "node src/app.js",
+    "dev":        "nodemon src/app.js",
+    "test":       "jest --coverage --forceExit",
+    "test:watch": "jest --watch",
+    "lint":       "eslint src/ --ext .js",
+    "lint:fix":   "eslint src/ --ext .js --fix"
+  },
+  "dependencies": {
+    "express":              "^4.18.3",
+    "express-rate-limit":   "^7.2.0",
+    "express-validator":    "^7.0.1",
+    "http-proxy-middleware":"^3.0.0",
+    "helmet":               "^7.1.0",
+    "cors":                 "^2.8.5",
+    "morgan":               "^1.10.0",
+    "winston":              "^3.12.0",
+    "jsonwebtoken":         "^9.0.2",
+    "jwks-rsa":             "^3.1.0",
+    "axios":                "^1.6.7",
+    "circuit-breaker-js":   "^0.0.1",
+    "prom-client":          "^15.1.0",
+    "uuid":                 "^9.0.1",
+    "dotenv":               "^16.4.5",
+    "express-async-errors": "^3.1.1",
+    "opossum":              "^8.1.0"
+  },
+  "devDependencies": {
+    "jest":          "^29.7.0",
+    "supertest":     "^6.3.4",
+    "nodemon":       "^3.1.0",
+    "eslint":        "^8.57.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "coverageThreshold": {
+      "global": {
+        "lines":     80,
+        "functions": 80,
+        "branches":  75
+      }
+    },
+    "collectCoverageFrom": [
+      "src/**/*.js",
+      "!src/app.js"
+    ]
+  }
+}

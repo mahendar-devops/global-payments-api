@@ -1,0 +1,35 @@
+---
+# infra/ansible/requirements.yml
+#
+# Ansible Galaxy collection and role dependencies.
+# Install with: ansible-galaxy install -r requirements.yml
+#
+# Run this before executing any playbook:
+#   ansible-galaxy collection install -r requirements.yml
+#   ansible-galaxy role install -r requirements.yml
+#
+# In the Jenkins pipeline, this runs as part of the AMI hardening stage:
+#   pip install ansible boto3 botocore
+#   ansible-galaxy collection install -r infra/ansible/requirements.yml
+#   ansible-playbook -i infra/ansible/inventory/aws_ec2.yml infra/ansible/site.yml
+
+collections:
+
+  # AWS dynamic inventory + EC2 modules (required for inventory/aws_ec2.yml)
+  - name: amazon.aws
+    version: ">=7.0.0"
+    source: https://galaxy.ansible.com
+
+  # POSIX modules: firewalld, sysctl, cron (used in linux-hardening role)
+  - name: ansible.posix
+    version: ">=1.5.0"
+    source: https://galaxy.ansible.com
+
+  # Community general utilities (lineinfile improvements, etc.)
+  - name: community.general
+    version: ">=8.0.0"
+    source: https://galaxy.ansible.com
+
+roles:
+  # No external roles — all roles are maintained in-repo under infra/ansible/roles/
+  # This keeps the AMI hardening self-contained and auditable.

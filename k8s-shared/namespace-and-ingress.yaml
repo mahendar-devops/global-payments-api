@@ -1,0 +1,268 @@
+# ─────────────────────────────────────────────────────────────────
+# k8s/shared/namespace-and-ingress.yaml
+#
+# Shared Kubernetes resources for the Global Payments API platform.
+# Apply before any service-specific manifests:
+#   kubectl apply -f k8s/shared/
+# ─────────────────────────────────────────────────────────────────
+
+---
+# Namespace with resource quotas
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: payments
+  labels:
+    team:        payments-devops
+    environment: production
+    pod-security.kubernetes.io/enforce: restricted    # Pod Security Standards
+
+---
+# Resource Quota — prevent one team exhausting cluster resources
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: payments-quota
+  namespace: payments
+spec:
+  hard:
+    requests.cpu:            "8"
+    requests.memory:         "16Gi"
+    limits.cpu:              "16"
+    limits.memory:           "32Gi"
+    count/pods:              "30"
+    count/persistentvolumeclaims: "10"
+
+---
+# LimitRange — ensures every pod has requests/limits set (no unbounded pods)
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: payments-limits
+  namespace: payments
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu:    "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu:    "100m"
+        memory: "128Mi"
+      max:
+        cpu:    "2000m"
+        memory: "4Gi"
+
+---
+# ── Ingress — External ALB → Gateway Service ──────────────────────
+# Uses the AWS Load Balancer Controller (installed via Helm in EKS).
+# All external traffic enters through the gateway-service only.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: payments-ingress
+  namespace: payments
+  annotations:
+    kubernetes.io/ingress.class:                         "alb"
+    alb.ingress.kubernetes.io/scheme:                    "internet-facing"
+    alb.ingress.kubernetes.io/target-type:               "ip"
+    alb.ingress.kubernetes.io/listen-ports:              '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect:              "443"
+    alb.ingress.kubernetes.io/certificate-arn:           "arn:aws:acm:eu-west-2:123456789:certificate/abc-123"
+    alb.ingress.kubernetes.io/waf-acl-id:                "arn:aws:wafv2:eu-west-2:123456789:regional/webacl/payments-waf/xyz"
+    alb.ingress.kubernetes.io/healthcheck-path:          "/health/liveness"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/load-balancer-name:        "payments-prod-alb"
+    alb.ingress.kubernetes.io/group.name:                "payments"
+    # Access logs to S3 for compliance/audit
+    alb.ingress.kubernetes.io/load-balancer-attributes: >
+      access_logs.s3.enabled=true,
+      access_logs.s3.bucket=payments-alb-logs-prod,
+      access_logs.s3.prefix=payments-api,
+      deletion_protection.enabled=true
+spec:
+  rules:
+    - host: api.globalpayments.com
+      http:
+        paths:
+          - path: /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway-service
+                port:
+                  number: 80
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway-service
+                port:
+                  number: 80
+
+---
+# ── Network Policies — Zero-trust inter-pod communication ─────────
+
+# Default deny-all: pods cannot communicate by default
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: payments
+spec:
+  podSelector: {}       # Applies to ALL pods in the namespace
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Gateway → payments-service: ALLOWED
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-payments
+  namespace: payments
+spec:
+  podSelector:
+    matchLabels:
+      app: payments-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gateway-service
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# External ALB → gateway-service: ALLOWED
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-alb-to-gateway
+  namespace: payments
+spec:
+  podSelector:
+    matchLabels:
+      app: gateway-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 3000
+
+---
+# Prometheus → all services: ALLOWED (scrape /metrics)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: payments
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 3000
+        - protocol: TCP
+          port: 5000
+
+---
+# All services → DNS: ALLOWED (CoreDNS resolution)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: payments
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# payments-service & data-processing-service → RDS: ALLOWED
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-db-egress
+  namespace: payments
+spec:
+  podSelector:
+    matchLabels:
+      tier: backend
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 5432    # PostgreSQL
+
+---
+# All services → Kafka: ALLOWED
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka-egress
+  namespace: payments
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+
+---
+# ── RBAC — Developer role (read-only to production) ───────────────
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: payments-developer
+  namespace: payments
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "events"]
+    verbs:     ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs:     ["get", "list", "watch"]
+  # Developers CANNOT exec into pods, delete pods, or modify secrets in prod
+  # (Principle of Least Privilege)
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: payments-developer-binding
+  namespace: payments
+subjects:
+  - kind: Group
+    name: "payments-developers"    # AWS SSO / IAM group name
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: payments-developer
+  apiGroup: rbac.authorization.k8s.io

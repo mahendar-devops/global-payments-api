@@ -1,0 +1,206 @@
+# k8s-shared/monitoring.yaml
+#
+# Prometheus ServiceMonitor resources for the kube-prometheus-stack.
+# These tell the in-cluster Prometheus operator WHICH services to scrape,
+# replacing the static prometheus.yml scrape config used in docker-compose.
+#
+# Prerequisite:
+#   helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#     --namespace monitoring --create-namespace
+
+---
+# ── payments-service ServiceMonitor ──────────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: payments-service-monitor
+  namespace: monitoring          # ServiceMonitor lives in the monitoring namespace
+  labels:
+    release: kube-prometheus-stack   # Must match the Helm release label selector
+spec:
+  namespaceSelector:
+    matchNames:
+      - payments
+  selector:
+    matchLabels:
+      app: payments-service
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 15s
+      scrapeTimeout: 10s
+
+---
+# ── gateway-service ServiceMonitor ───────────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gateway-service-monitor
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - payments
+  selector:
+    matchLabels:
+      app: gateway-service
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+
+---
+# ── data-processing-service ServiceMonitor ───────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: data-processing-monitor
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - payments
+  selector:
+    matchLabels:
+      app: data-processing-service
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s        # Slower scrape — batch service, not real-time
+      scrapeTimeout: 15s
+
+---
+# ── PrometheusRule — Alerting Rules ──────────────────────────────────────────
+# These fire alerts into AlertManager → PagerDuty / Slack
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: payments-platform-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+
+    - name: payments-service.rules
+      interval: 30s
+      rules:
+
+        # ── SLA: P99 latency > 500ms for 5 minutes ─────────────────────────
+        - alert: PaymentsHighLatency
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_server_requests_seconds_bucket{
+                job="payments-service",
+                uri=~"/api/v1/payments.*"
+              }[5m])) by (le, uri)
+            ) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+            service: payments-service
+            team: payments-devops
+          annotations:
+            summary: "High P99 latency on payments-service"
+            description: "P99 latency for {{ $labels.uri }} is {{ $value | humanizeDuration }} (threshold: 500ms)"
+            runbook: "https://wiki.bank.com/runbooks/payments-high-latency"
+
+        # ── Error rate > 1% for 5 minutes ──────────────────────────────────
+        - alert: PaymentsHighErrorRate
+          expr: |
+            sum(rate(http_server_requests_seconds_count{
+              job="payments-service",
+              status=~"5.."
+            }[5m]))
+            /
+            sum(rate(http_server_requests_seconds_count{
+              job="payments-service"
+            }[5m])) > 0.01
+          for: 5m
+          labels:
+            severity: critical
+            service: payments-service
+            team: payments-devops
+          annotations:
+            summary: "High error rate on payments-service"
+            description: "Error rate is {{ $value | humanizePercentage }} (threshold: 1%)"
+            runbook: "https://wiki.bank.com/runbooks/payments-error-rate"
+
+        # ── Pod count below desired replicas ───────────────────────────────
+        - alert: PaymentsPodsUnavailable
+          expr: |
+            kube_deployment_status_replicas_available{
+              namespace="payments",
+              deployment="payments-service"
+            } < 2
+          for: 2m
+          labels:
+            severity: critical
+            service: payments-service
+          annotations:
+            summary: "payments-service has fewer than 2 available pods"
+            description: "Available pods: {{ $value }}, required minimum: 2"
+
+    - name: gateway-service.rules
+      rules:
+
+        # ── Circuit breaker open ────────────────────────────────────────────
+        - alert: GatewayCircuitBreakerOpen
+          expr: gateway_circuit_breaker_state{service="payments-service"} == 1
+          for: 1m
+          labels:
+            severity: critical
+            service: gateway-service
+            team: payments-devops
+          annotations:
+            summary: "Gateway circuit breaker is OPEN for payments-service"
+            description: "The gateway is blocking all requests to payments-service. Check payments-service health."
+            runbook: "https://wiki.bank.com/runbooks/circuit-breaker-open"
+
+        # ── High rate-limit rejections ──────────────────────────────────────
+        - alert: GatewayHighRateLimitRejections
+          expr: |
+            sum(rate(gateway_http_requests_total{
+              status_code="429"
+            }[5m])) > 10
+          for: 5m
+          labels:
+            severity: warning
+            service: gateway-service
+          annotations:
+            summary: "High rate of 429 Too Many Requests from gateway"
+            description: "Possible DDoS or misbehaving client. Rate: {{ $value }} req/s rejected."
+
+    - name: reconciliation.rules
+      rules:
+
+        # ── Reconciliation match rate < 99% ────────────────────────────────
+        - alert: ReconciliationLowMatchRate
+          expr: |
+            reconciliation_match_rate_percent < 99
+          for: 0m          # Alert immediately — any exception needs investigation
+          labels:
+            severity: warning
+            service: data-processing-service
+            team: finance-ops
+          annotations:
+            summary: "Reconciliation match rate below 99%"
+            description: "Match rate: {{ $value }}%. Exceptions require Finance Ops investigation."
+
+        # ── Reconciliation job didn't run ──────────────────────────────────
+        - alert: ReconciliationJobMissed
+          expr: |
+            time() - reconciliation_last_successful_run_timestamp > 86400
+          for: 30m
+          labels:
+            severity: critical
+            service: data-processing-service
+            team: payments-devops
+          annotations:
+            summary: "Daily reconciliation job has not run in 24 hours"
+            description: "Last successful run was {{ $value | humanizeDuration }} ago. Check the CronJob."

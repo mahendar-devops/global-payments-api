@@ -1,0 +1,53 @@
+# data-processing-service/requirements.txt
+# Pin ALL versions for reproducible builds (critical in banking)
+
+# ── Web Framework ────────────────────────────────────────────────
+Flask==3.0.2
+gunicorn==21.2.0
+
+# ── Database ─────────────────────────────────────────────────────
+SQLAlchemy==2.0.28
+psycopg2-binary==2.9.9
+Flask-SQLAlchemy==3.1.1
+alembic==1.13.1           # DB migrations
+
+# ── Data Processing ───────────────────────────────────────────────
+pandas==2.2.1
+numpy==1.26.4
+pyarrow==15.0.1           # Efficient data exchange format
+
+# ── Messaging ─────────────────────────────────────────────────────
+confluent-kafka==2.3.0
+
+# ── AWS SDK ───────────────────────────────────────────────────────
+boto3==1.34.49
+botocore==1.34.49
+
+# ── Validation ────────────────────────────────────────────────────
+marshmallow==3.21.1
+pydantic==2.6.3
+
+# ── Observability ─────────────────────────────────────────────────
+prometheus-flask-exporter==0.23.0
+opentelemetry-api==1.23.0
+opentelemetry-sdk==1.23.0
+opentelemetry-instrumentation-flask==0.44b0
+opentelemetry-exporter-otlp==1.23.0
+
+# ── Security ──────────────────────────────────────────────────────
+PyJWT==2.8.0
+cryptography==42.0.4
+
+# ── Utilities ─────────────────────────────────────────────────────
+python-dotenv==1.0.1
+requests==2.31.0
+tenacity==8.2.3           # Retry logic with exponential backoff
+structlog==24.1.0         # Structured logging
+
+# ── Testing ───────────────────────────────────────────────────────
+pytest==8.0.2
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+flask-testing==0.8.1
+factory-boy==3.3.0
+freezegun==1.4.0          # Freeze time in tests

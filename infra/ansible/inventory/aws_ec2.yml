@@ -1,0 +1,52 @@
+# infra/ansible/inventory/aws_ec2.yml
+#
+# AWS EC2 Dynamic Inventory Plugin.
+# Automatically discovers EC2 instances tagged with the project tags.
+# No static IP addresses needed — instances are found by tags.
+#
+# Usage:
+#   ansible-inventory -i inventory/aws_ec2.yml --list   # See discovered hosts
+#   ansible-inventory -i inventory/aws_ec2.yml --graph  # See groupings
+#
+# Requires: boto3 and botocore installed, AWS credentials configured
+# (either via ~/.aws/credentials or IAM instance profile)
+
+plugin: amazon.aws.aws_ec2
+
+# AWS regions to query
+regions:
+  - eu-west-2
+
+# Filter: only return running instances tagged as part of this project
+filters:
+  instance-state-name: running
+  "tag:Project": GlobalPaymentsAPI
+
+# Group instances by these tag values
+# Creates Ansible groups like: tag_Environment_prod, tag_Role_eks_worker
+keyed_groups:
+  - prefix: tag
+    key: tags
+
+  - prefix: env
+    key: tags.Environment
+
+  - prefix: role
+    key: tags.Role
+
+# Use private IP for SSH (we're running Ansible from within the VPC
+# or via a bastion host — instances have no public IPs)
+hostnames:
+  - private-ip-address
+
+# Compose additional variables for each host
+compose:
+  ansible_host: private_ip_address
+  instance_id:  instance_id
+  instance_type: instance_type
+
+# Cache discovered inventory (avoid repeated AWS API calls)
+cache: True
+cache_plugin: jsonfile
+cache_timeout: 300
+cache_connection: /tmp/aws_ec2_inventory_cache

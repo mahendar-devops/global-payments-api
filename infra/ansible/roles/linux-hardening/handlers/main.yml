@@ -1,0 +1,40 @@
+---
+# infra/ansible/roles/linux-hardening/handlers/main.yml
+# Handlers only fire once at the end of the play, even if notified multiple times.
+# This prevents e.g. SSH restarting 5 times during a config run.
+
+- name: Restart SSH
+  ansible.builtin.systemd:
+    name: sshd
+    state: restarted
+  listen: Restart SSH
+
+- name: Reload SSH
+  ansible.builtin.systemd:
+    name: sshd
+    state: reloaded
+  listen: Reload SSH
+
+- name: Restart auditd
+  ansible.builtin.systemd:
+    name: auditd
+    state: restarted
+  listen: Restart auditd
+
+- name: Reload firewalld
+  ansible.builtin.systemd:
+    name: firewalld
+    state: reloaded
+  listen: Reload firewalld
+
+- name: Restart fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    state: restarted
+  listen: Restart fail2ban
+
+- name: Restart rsyslog
+  ansible.builtin.systemd:
+    name: rsyslog
+    state: restarted
+  listen: Restart rsyslog

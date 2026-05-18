@@ -1,0 +1,7 @@
+# .trivyignore — Trivy CVE Exception List (gateway-service)
+#
+# FORMAT: CVE-ID [expiry-date] [reason]
+# POLICY: Every entry MUST have expiry (max 90 days) + AppSec ticket + approver.
+#
+# Currently no approved exceptions.
+# All CRITICAL and HIGH vulnerabilities block the pipeline.

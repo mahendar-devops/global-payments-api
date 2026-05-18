@@ -1,0 +1,156 @@
+# ─────────────────────────────────────────────────────────────────
+# payments-service — Application Configuration
+#
+# Sensitive values (passwords, secrets) are NEVER stored here.
+# They are injected at runtime via:
+#   - AWS Secrets Manager (Kubernetes Secrets Store CSI Driver)
+#   - Environment variables populated from K8s Secrets
+# ─────────────────────────────────────────────────────────────────
+
+spring:
+  application:
+    name: payments-service
+
+  # ── Database ───────────────────────────────────────────────────
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/payments}
+    username: ${DB_USERNAME:payments_user}
+    password: ${DB_PASSWORD}           # Injected from Secrets Manager
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10            # Tune based on RDS instance class
+      minimum-idle: 2
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      connection-test-query: SELECT 1
+
+  jpa:
+    hibernate:
+      ddl-auto: validate               # Flyway manages schema — never use update/create
+    show-sql: false                    # Never log SQL in production (credential leak risk)
+    open-in-view: false               # Prevent N+1 and connection pool exhaustion
+
+  # ── Flyway DB Migrations ───────────────────────────────────────
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+
+  # ── Kafka ──────────────────────────────────────────────────────
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all                        # Wait for all replicas to acknowledge
+      retries: 3
+      properties:
+        enable.idempotence: true       # Exactly-once producer semantics
+    consumer:
+      group-id: payments-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.globalpayments.*"
+
+# ── Server ─────────────────────────────────────────────────────
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful                   # Wait for in-flight requests on SIGTERM
+  tomcat:
+    threads:
+      max: 50                          # Limit threads — EKS pods are resource-constrained
+    connection-timeout: 20000
+
+spring.lifecycle:
+  timeout-per-shutdown-phase: 30s     # Grace period for active requests
+
+# ── Actuator / Metrics ─────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized    # Full details only for authenticated users
+      probes:
+        enabled: true                  # /actuator/health/liveness, /readiness
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:local}
+
+# ── Tracing (OpenTelemetry) ─────────────────────────────────────
+management.tracing:
+  sampling:
+    probability: ${TRACE_SAMPLE_RATE:0.1}  # Sample 10% in prod (100% in dev)
+  propagation:
+    type: b3_multi                     # Jaeger/Zipkin compatible
+
+# ── App-specific ───────────────────────────────────────────────
+app:
+  jwt:
+    secret: ${JWT_SECRET}              # Injected from AWS Secrets Manager
+  payment:
+    max-retry-attempts: 3
+    retry-backoff-minutes: 5
+
+# ── OpenAPI Docs ───────────────────────────────────────────────
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+# ── Logging ────────────────────────────────────────────────────
+logging:
+  level:
+    root: INFO
+    com.globalpayments: ${LOG_LEVEL:INFO}
+    org.springframework.security: WARN  # Don't log auth details
+    org.hibernate.SQL: WARN             # Never log SQL in prod
+  pattern:
+    console: >
+      {"timestamp":"%d{yyyy-MM-dd'T'HH:mm:ss.SSSZ}",
+       "level":"%p","logger":"%logger{36}",
+       "trace":"%X{traceId}","span":"%X{spanId}",
+       "message":"%msg"}%n
+
+---
+# ── Local Development Profile ──────────────────────────────────
+spring:
+  config:
+    activate:
+      on-profile: local
+  datasource:
+    password: localpassword
+  kafka:
+    bootstrap-servers: localhost:9092
+app:
+  jwt:
+    secret: local-dev-secret-do-not-use-in-production-min-32-chars
+
+logging:
+  level:
+    com.globalpayments: DEBUG
+    org.hibernate.SQL: DEBUG
+
+---
+# ── Test Profile ───────────────────────────────────────────────
+spring:
+  config:
+    activate:
+      on-profile: test
+  datasource:
+    url: jdbc:tc:postgresql:15:///payments  # TestContainers JDBC URL
+  kafka:
+    bootstrap-servers: ${spring.embedded.kafka.brokers}
+  flyway:
+    enabled: true
+
+app:
+  jwt:
+    secret: test-secret-key-32-characters-long!!

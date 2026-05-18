@@ -1,0 +1,21 @@
+# .trivyignore — Trivy CVE Exception List
+#
+# FORMAT: CVE-ID [expiry-date] [reason]
+#
+# POLICY: Every entry MUST have:
+#   1. An expiry date (max 90 days — reviewed in the next sprint)
+#   2. A justification linking to the AppSec ticket
+#   3. The name of the engineer who approved the exception
+#
+# If a CVE has no fix available, set expiry to 90 days and reassess.
+# ALL entries are audited quarterly by the Security team.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Example format (DO NOT leave real entries uncommented without approval):
+#
+# CVE-2024-12345 exp:2024-06-15 # No fix available in Spring Boot 3.2.x
+#                               # AppSec ticket: SEC-1234 | Approved: J.Smith
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Currently no approved exceptions.
+# All CRITICAL and HIGH vulnerabilities block the pipeline and must be remediated.

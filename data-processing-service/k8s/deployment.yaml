@@ -1,0 +1,204 @@
+# ─────────────────────────────────────────────────────────────────
+# data-processing-service — Kubernetes Manifests
+# Namespace: payments
+# ─────────────────────────────────────────────────────────────────
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-processing-service
+  namespace: payments
+  labels:
+    app: data-processing-service
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: data-processing-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: data-processing-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "5000"
+    spec:
+      serviceAccountName: data-processing-sa
+
+      terminationGracePeriodSeconds: 60
+
+      containers:
+        - name: data-processing-service
+          image: 123456789.dkr.ecr.eu-west-2.amazonaws.com/data-processing-service:IMAGE_TAG
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 5000
+              name: http
+
+          env:
+            - name: FLASK_ENV
+              value: "production"
+            - name: PORT
+              value: "5000"
+            - name: ENVIRONMENT
+              value: "production"
+            - name: AWS_REGION
+              value: "eu-west-2"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: data-processing-db-secret
+                  key: database-url
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: payments-config
+                  key: kafka-bootstrap-servers
+            - name: S3_REPORTS_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: data-processing-config
+                  key: s3-reports-bucket
+
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"    # Higher limit — pandas loads DataFrames into memory
+              cpu: "1000m"
+
+          startupProbe:
+            httpGet:
+              path: /health/liveness
+              port: 5000
+            failureThreshold: 20
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /health/liveness
+              port: 5000
+            periodSeconds: 15
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 5000
+            periodSeconds: 10
+            failureThreshold: 3
+
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 15"]
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp-dir
+          emptyDir:
+            sizeLimit: 1Gi    # Limit temp storage for CSV processing
+
+---
+# CronJob — triggers daily reconciliation at 06:00 UTC
+# (Settlement files from the clearing network arrive ~05:30 UTC)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: daily-reconciliation
+  namespace: payments
+spec:
+  schedule: "0 6 * * *"         # Daily at 06:00 UTC
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid      # Never run two reconciliations simultaneously
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2            # Retry failed reconciliation up to 2 times
+      activeDeadlineSeconds: 3600  # Kill if takes longer than 1 hour
+      template:
+        spec:
+          serviceAccountName: data-processing-sa
+          restartPolicy: OnFailure
+          containers:
+            - name: reconciliation-trigger
+              image: curlimages/curl:8.6.0
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  curl -f -X POST \
+                    http://data-processing-service.payments.svc.cluster.local:5000/api/v1/reconciliation/run \
+                    -H "Content-Type: application/json" \
+                    -d '{}' \
+                    --max-time 3500
+              resources:
+                requests:
+                  memory: "32Mi"
+                  cpu: "10m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-processing-service
+  namespace: payments
+spec:
+  type: ClusterIP
+  selector:
+    app: data-processing-service
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: data-processing-pdb
+  namespace: payments
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: data-processing-service
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: data-processing-config
+  namespace: payments
+data:
+  s3-reports-bucket: "payments-reports-prod-123456"
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: data-processing-sa
+  namespace: payments
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789:role/data-processing-role"

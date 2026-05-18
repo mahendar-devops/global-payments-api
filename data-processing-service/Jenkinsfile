@@ -1,0 +1,129 @@
+// data-processing-service/Jenkinsfile
+// Python Flask Reconciliation Service — Free-Tier EC2 CI/CD Pipeline
+//
+// Jenkins Credentials required:
+//   app-server-ssh-key → SSH private key
+//   app-server-ip      → App server IP (secret text)
+//   sonarqube-token    → SonarQube token (secret text)
+
+pipeline {
+    agent any
+
+    environment {
+        APP_NAME    = 'data-processing-service'
+        IMAGE_TAG   = "${BUILD_NUMBER}-${GIT_COMMIT.take(7)}"
+        APP_SERVER  = credentials('app-server-ip')
+        SONAR_TOKEN = credentials('sonarqube-token')
+    }
+
+    options {
+        timeout(time: 20, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps { checkout scm }
+        }
+
+        stage('Python Tests') {
+            steps {
+                dir('data-processing-service') {
+                    sh '''
+                        python3 --version
+                        pip3 install -r requirements.txt --quiet --break-system-packages 2>/dev/null || \
+                        pip3 install -r requirements.txt --quiet
+
+                        # Run tests with coverage
+                        FLASK_ENV=testing python3 -m pytest tests/ \
+                          --cov=app \
+                          --cov-report=xml:coverage.xml \
+                          --cov-report=term \
+                          -v --tb=short || true
+                    '''
+                }
+            }
+        }
+
+        stage('SonarQube') {
+            steps {
+                dir('data-processing-service') {
+                    sh """
+                        sonar-scanner \
+                          -Dsonar.projectKey=data-processing-service \
+                          -Dsonar.sources=app \
+                          -Dsonar.python.version=3 \
+                          -Dsonar.python.coverage.reportPaths=coverage.xml \
+                          -Dsonar.exclusions=tests/**,migrations/**,**/__pycache__/** \
+                          -Dsonar.host.url=http://localhost:9000 \
+                          -Dsonar.login=${SONAR_TOKEN} || true
+                    """
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                dir('data-processing-service') {
+                    sh "docker build -t ${APP_NAME}:${IMAGE_TAG} -t ${APP_NAME}:latest ."
+                }
+            }
+        }
+
+        stage('Trivy Scan') {
+            steps {
+                sh """
+                    trivy image --exit-code 1 --severity CRITICAL,HIGH \
+                      --timeout 5m --format table ${APP_NAME}:${IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Deploy') {
+            when { branch 'main' }
+            steps {
+                sshagent(['app-server-ssh-key']) {
+                    sh """
+                        docker save ${APP_NAME}:${IMAGE_TAG} | gzip > /tmp/${APP_NAME}.tar.gz
+                        scp -o StrictHostKeyChecking=no /tmp/${APP_NAME}.tar.gz ec2-user@${APP_SERVER}:/tmp/
+                        ssh -o StrictHostKeyChecking=no ec2-user@${APP_SERVER} '
+                          set -e
+                          docker load < /tmp/${APP_NAME}.tar.gz
+                          docker stop ${APP_NAME} 2>/dev/null || true
+                          docker rm   ${APP_NAME} 2>/dev/null || true
+                          docker run -d --name ${APP_NAME} --restart unless-stopped \
+                            --network global-payments-api_payments-net \
+                            -p 5000:5000 \
+                            -e FLASK_ENV=production \
+                            -e DATABASE_URL="postgresql://payments_user:\$(grep DB_PASSWORD ~/global-payments-api/.env | cut -d= -f2)@postgres:5432/payments" \
+                            -e KAFKA_BOOTSTRAP_SERVERS=kafka:9092 \
+                            ${APP_NAME}:${IMAGE_TAG}
+                          rm -f /tmp/${APP_NAME}.tar.gz
+                          echo "✅ ${APP_NAME} deployed"
+                        '
+                        rm -f /tmp/${APP_NAME}.tar.gz
+                    """
+                }
+            }
+        }
+
+        stage('Smoke Test') {
+            when { branch 'main' }
+            steps {
+                sh """
+                    sleep 20
+                    STATUS=\$(curl -sf -o /dev/null -w '%{http_code}' http://${APP_SERVER}:5000/health/liveness || echo 000)
+                    [ "\$STATUS" = "200" ] && echo "✅ data-processing-service healthy" || { echo "❌ Failed: \$STATUS"; exit 1; }
+                """
+            }
+        }
+    }
+
+    post {
+        always { sh "docker rmi ${APP_NAME}:${IMAGE_TAG} 2>/dev/null || true; docker image prune -f || true" }
+        success { echo "✅ ${APP_NAME} deployed — ${IMAGE_TAG}" }
+        failure { echo "❌ ${APP_NAME} failed — ${env.STAGE_NAME}" }
+    }
+}

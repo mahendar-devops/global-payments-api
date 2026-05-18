@@ -1,0 +1,230 @@
+# docker-compose.yml
+# Local development environment for the Global Payments API.
+#
+# Starts all three microservices plus their dependencies:
+#   - PostgreSQL (payments DB + reporting DB)
+#   - Kafka + Zookeeper
+#   - SonarQube (for local code quality checks)
+#   - Prometheus + Grafana (for local observability)
+#
+# Usage:
+#   docker-compose up -d               # Start everything
+#   docker-compose up payments-service # Start one service
+#   docker-compose logs -f             # Follow all logs
+#   docker-compose down -v             # Stop and remove volumes
+
+version: "3.9"
+
+# ── Shared Network ────────────────────────────────────────────────
+networks:
+  payments-network:
+    driver: bridge
+
+# ── Volumes ───────────────────────────────────────────────────────
+volumes:
+  postgres-payments-data:
+  postgres-reporting-data:
+  kafka-data:
+  zookeeper-data:
+  sonarqube-data:
+  sonarqube-logs:
+  prometheus-data:
+  grafana-data:
+
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────
+
+  postgres-payments:
+    image: postgres:15-alpine
+    container_name: postgres-payments
+    environment:
+      POSTGRES_DB:       payments
+      POSTGRES_USER:     payments_user
+      POSTGRES_PASSWORD: localpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-payments-data:/var/lib/postgresql/data
+    networks: [payments-network]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments_user -d payments"]
+      interval: 10s
+      retries: 5
+
+  postgres-reporting:
+    image: postgres:15-alpine
+    container_name: postgres-reporting
+    environment:
+      POSTGRES_DB:       payments_reporting
+      POSTGRES_USER:     reporting_user
+      POSTGRES_PASSWORD: localpassword
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-reporting-data:/var/lib/postgresql/data
+    networks: [payments-network]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reporting_user -d payments_reporting"]
+      interval: 10s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME:   2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+    networks: [payments-network]
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    depends_on: [zookeeper]
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID:                           1
+      KAFKA_ZOOKEEPER_CONNECT:                   zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS:                PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP:      PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME:          PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR:    1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE:           "true"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks: [payments-network]
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── Microservices ───────────────────────────────────────────────
+
+  payments-service:
+    build:
+      context: ./payments-service
+      dockerfile: Dockerfile
+    container_name: payments-service
+    depends_on:
+      postgres-payments:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE:  local
+      DB_URL:                  jdbc:postgresql://postgres-payments:5432/payments
+      DB_USERNAME:             payments_user
+      DB_PASSWORD:             localpassword
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      JWT_SECRET:              local-dev-secret-do-not-use-in-production-32chars
+      ENVIRONMENT:             local
+      LOG_LEVEL:               DEBUG
+    networks: [payments-network]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  gateway-service:
+    build:
+      context: ./gateway-service
+      dockerfile: Dockerfile
+    container_name: gateway-service
+    depends_on:
+      payments-service:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV:              development
+      PORT:                  3000
+      PAYMENTS_SERVICE_URL:  http://payments-service:8080
+      JWT_SECRET:            local-dev-secret-do-not-use-in-production-32chars
+      JWT_ISSUER:            global-payments-auth
+      ALLOWED_ORIGINS:       http://localhost:4200,http://localhost:3001
+      LOG_LEVEL:             debug
+    networks: [payments-network]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/health/liveness || exit 1"]
+      interval: 15s
+      start_period: 15s
+      retries: 3
+
+  data-processing-service:
+    build:
+      context: ./data-processing-service
+      dockerfile: Dockerfile
+    container_name: data-processing-service
+    depends_on:
+      postgres-reporting:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    environment:
+      FLASK_ENV:               development
+      DATABASE_URL:            postgresql://reporting_user:localpassword@postgres-reporting:5432/payments_reporting
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      AWS_REGION:              eu-west-2
+      S3_REPORTS_BUCKET:       payments-reports-local
+      ENVIRONMENT:             local
+      LOG_LEVEL:               DEBUG
+    networks: [payments-network]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5000/health/liveness || exit 1"]
+      interval: 30s
+      start_period: 30s
+      retries: 3
+
+  # ── Observability Stack ─────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    networks: [payments-network]
+
+  grafana:
+    image: grafana/grafana:10.3.0
+    container_name: grafana
+    depends_on: [prometheus]
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP:     "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks: [payments-network]
+
+  sonarqube:
+    image: sonarqube:10.4-community
+    container_name: sonarqube
+    ports:
+      - "9000:9000"
+    environment:
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+    volumes:
+      - sonarqube-data:/opt/sonarqube/data
+      - sonarqube-logs:/opt/sonarqube/logs
+    networks: [payments-network]

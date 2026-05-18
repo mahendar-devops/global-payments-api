@@ -1,0 +1,75 @@
+# payments-service/src/test/resources/application-test.yml
+#
+# Test profile configuration.
+# Loaded automatically when tests run with @ActiveProfiles("test").
+#
+# Overrides production settings with test-safe values:
+#   - Testcontainers JDBC URL auto-provisions a real PostgreSQL container
+#   - Embedded Kafka broker replaces the real Kafka cluster
+#   - Shorter timeouts to keep test suite fast
+#   - Flyway enabled so the schema is created fresh per test run
+
+spring:
+  config:
+    activate:
+      on-profile: test
+
+  # Testcontainers JDBC URL — spins up a real PostgreSQL Docker container.
+  # The tc: prefix is intercepted by the Testcontainers JDBC driver.
+  # No manual setup required — Docker must be running on the test host.
+  datasource:
+    url: jdbc:tc:postgresql:15:///payments_test
+    username: test_user
+    password: test_password
+    driver-class-name: org.testcontainers.jdbc.ContainerDatabaseDriver
+    hikari:
+      maximum-pool-size: 5
+
+  jpa:
+    hibernate:
+      ddl-auto: validate        # Flyway manages schema — validate it's correct
+    show-sql: true              # Log SQL in tests to aid debugging
+    open-in-view: false
+
+  flyway:
+    enabled: true               # Apply migrations to the test container
+
+  # EmbeddedKafka broker — @EmbeddedKafka annotation in the test class
+  # provides the broker; this wires Spring Boot to use it.
+  kafka:
+    bootstrap-servers: ${spring.embedded.kafka.brokers}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    consumer:
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.globalpayments.*"
+
+# Shorter timeouts for test speed
+server:
+  shutdown: immediate           # Don't wait for drain in tests
+
+# Disable distributed tracing in tests (avoids OTLP connection errors)
+management:
+  tracing:
+    sampling:
+      probability: 0.0
+
+# App config — test values (no real secrets needed)
+app:
+  jwt:
+    secret: test-secret-key-minimum-32-characters-long!!
+  payment:
+    max-retry-attempts: 3
+    retry-backoff-minutes: 5
+
+# Silence noisy logs during test runs
+logging:
+  level:
+    root: WARN
+    com.globalpayments: DEBUG
+    org.flywaydb: INFO
+    org.testcontainers: INFO

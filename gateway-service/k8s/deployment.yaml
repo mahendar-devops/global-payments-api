@@ -1,0 +1,190 @@
+# ─────────────────────────────────────────────────────────────────
+# gateway-service — Kubernetes Manifests
+# Namespace: payments
+# ─────────────────────────────────────────────────────────────────
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-service
+  namespace: payments
+  labels:
+    app: gateway-service
+    tier: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gateway-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: gateway-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "3000"
+    spec:
+      serviceAccountName: gateway-service-sa
+      terminationGracePeriodSeconds: 45
+
+      containers:
+        - name: gateway-service
+          image: 123456789.dkr.ecr.eu-west-2.amazonaws.com/gateway-service:IMAGE_TAG
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 3000
+              name: http
+
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3000"
+            - name: ENVIRONMENT
+              value: "production"
+            - name: PAYMENTS_SERVICE_URL
+              value: "http://payments-service.payments.svc.cluster.local:80"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: payments-jwt-secret
+                  key: jwt-secret
+            - name: ALLOWED_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: gateway-config
+                  key: allowed-origins
+            - name: LOG_LEVEL
+              value: "info"
+
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+
+          startupProbe:
+            httpGet:
+              path: /health/liveness
+              port: 3000
+            failureThreshold: 10
+            periodSeconds: 5
+
+          livenessProbe:
+            httpGet:
+              path: /health/liveness
+              port: 3000
+            periodSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 3000
+            periodSeconds: 5
+            failureThreshold: 3
+
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: gateway-service
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-service
+  namespace: payments
+spec:
+  type: ClusterIP
+  selector:
+    app: gateway-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway-service-hpa
+  namespace: payments
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gateway-service
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway-service-pdb
+  namespace: payments
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: gateway-service
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: payments
+data:
+  allowed-origins: "https://banking.globalpayments.com,https://app.globalpayments.com"
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway-service-sa
+  namespace: payments
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789:role/gateway-service-role"

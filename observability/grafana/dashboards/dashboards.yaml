@@ -1,0 +1,15 @@
+# observability/grafana/dashboards/dashboards.yaml
+# Tells Grafana where to find dashboard JSON files on disk.
+
+apiVersion: 1
+
+providers:
+  - name: 'Global Payments API'
+    orgId: 1
+    folder: 'Payments Platform'
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/provisioning/dashboards

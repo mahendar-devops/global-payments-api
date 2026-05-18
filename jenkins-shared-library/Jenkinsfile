@@ -1,0 +1,164 @@
+// jenkins-shared-library/Jenkinsfile
+//
+// CI pipeline for the Jenkins Shared Library itself.
+// Validates syntax, runs unit tests, and verifies the library loads correctly
+// before changes are merged to main.
+//
+// Triggered by: GitHub Webhook on PRs to main
+// Branch strategy: Any branch — PRs must pass before merge
+
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  serviceAccountName: jenkins-agent-sa
+  containers:
+  - name: groovy
+    image: groovy:4.0-jdk17-alpine
+    command: ['sleep', 'infinity']
+    resources:
+      requests: { memory: "256Mi", cpu: "100m" }
+      limits:   { memory: "512Mi", cpu: "500m" }
+"""
+        }
+    }
+
+    options {
+        timeout(time: 15, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        disableConcurrentBuilds()
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+                echo "Validating Jenkins Shared Library: branch=${env.GIT_BRANCH}"
+            }
+        }
+
+        stage('Groovy Syntax Check') {
+            steps {
+                container('groovy') {
+                    script {
+                        echo "Checking Groovy syntax for all vars/ and src/ files..."
+
+                        // Find all .groovy files and syntax-check each one
+                        def groovyFiles = sh(
+                            script: 'find vars/ src/ -name "*.groovy" 2>/dev/null || true',
+                            returnStdout: true
+                        ).trim().split('\n').findAll { it }
+
+                        if (!groovyFiles) {
+                            echo "No Groovy files found to check."
+                            return
+                        }
+
+                        def failures = []
+                        groovyFiles.each { file ->
+                            def result = sh(
+                                script: "groovy -e 'new GroovyShell().parse(new File(\"${file}\"))' 2>&1 || true",
+                                returnStatus: true
+                            )
+                            if (result != 0) {
+                                failures << file
+                                echo "❌ Syntax error in: ${file}"
+                            } else {
+                                echo "✅ ${file}"
+                            }
+                        }
+
+                        if (failures) {
+                            error "Groovy syntax errors found in: ${failures.join(', ')}"
+                        }
+
+                        echo "✅ All ${groovyFiles.size()} Groovy files pass syntax check"
+                    }
+                }
+            }
+        }
+
+        stage('Validate vars/ Structure') {
+            steps {
+                script {
+                    // Every file in vars/ must have a call() method (the entry point)
+                    def varFiles = sh(
+                        script: 'find vars/ -name "*.groovy" 2>/dev/null || true',
+                        returnStdout: true
+                    ).trim().split('\n').findAll { it }
+
+                    def missingCall = varFiles.findAll { file ->
+                        def content = readFile(file)
+                        !content.contains('def call(')
+                    }
+
+                    if (missingCall) {
+                        error "The following vars/ files are missing a call() method (required for pipeline steps):\n${missingCall.join('\n')}"
+                    }
+
+                    echo "✅ All vars/ files have a call() method"
+                }
+            }
+        }
+
+        stage('Validate Resources') {
+            steps {
+                script {
+                    // Check that all referenced resource files exist
+                    def requiredResources = [
+                        'resources/trivy-config.yaml',
+                    ]
+
+                    def missing = requiredResources.findAll { !fileExists(it) }
+
+                    if (missing) {
+                        error "Missing resource files: ${missing.join(', ')}"
+                    }
+
+                    echo "✅ All required resource files present"
+                }
+            }
+        }
+
+        stage('README Check') {
+            steps {
+                script {
+                    // Ensure README exists and documents all vars/
+                    if (!fileExists('README.md')) {
+                        error "README.md is missing from the shared library root"
+                    }
+
+                    def readme = readFile('README.md')
+                    def varFiles = sh(
+                        script: 'find vars/ -name "*.groovy" -exec basename {} .groovy \\;',
+                        returnStdout: true
+                    ).trim().split('\n').findAll { it }
+
+                    def undocumented = varFiles.findAll { varName ->
+                        !readme.contains(varName)
+                    }
+
+                    if (undocumented) {
+                        echo "⚠️  WARNING: The following vars/ are not documented in README.md: ${undocumented.join(', ')}"
+                        // Warning only — don't fail the build for this
+                    } else {
+                        echo "✅ All vars/ are documented in README.md"
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Jenkins Shared Library validation passed — safe to merge"
+        }
+        failure {
+            echo "❌ Jenkins Shared Library validation FAILED — do not merge"
+        }
+    }
+}

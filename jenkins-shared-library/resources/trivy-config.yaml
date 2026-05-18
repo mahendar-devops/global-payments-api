@@ -1,0 +1,49 @@
+# jenkins-shared-library/resources/trivy-config.yaml
+#
+# Trivy scanner configuration loaded by the shared library.
+# This file is embedded in the shared library JAR and copied to the
+# workspace before scanning runs.
+#
+# Docs: https://aquasecurity.github.io/trivy/latest/docs/references/configuration/config/
+
+# Scanner settings
+scan:
+  # Skip scanner types not relevant to container images
+  scanners:
+    - vuln         # OS and library vulnerabilities
+    - secret       # Detect hardcoded secrets in image layers
+    - misconfig    # Dockerfile misconfigurations (e.g. running as root)
+
+# Vulnerability database
+db:
+  # Cache the DB locally to speed up repeated scans on the same agent
+  cache-dir: /tmp/trivy-cache
+
+# Output settings
+format: table
+
+# Severity thresholds
+severity:
+  - CRITICAL
+  - HIGH
+
+# Skip files that inflate results with false positives
+skip-files:
+  - "usr/share/doc"
+  - "usr/share/man"
+
+# Secret scanning — patterns for common secret types
+secret:
+  config: /tmp/trivy-secret-config.yaml   # Generated at runtime
+
+# Timeout (important for large images)
+timeout: 10m0s
+
+# Compliance — map findings to PCI-DSS controls (financial services)
+compliance:
+  spec: ""   # Optional: set to 'pci-dss' to generate compliance reports
+
+# Java-specific settings
+java-db:
+  # Java advisory database for JAR/WAR scanning
+  skip-update: false

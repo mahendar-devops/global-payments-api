@@ -1,0 +1,84 @@
+---
+# infra/ansible/roles/linux-hardening/defaults/main.yml
+#
+# Default variable values for the linux-hardening role.
+# Override these in group_vars/ or host_vars/ for environment-specific values.
+# NEVER store secrets here — use Ansible Vault or AWS Secrets Manager.
+
+# ── SSH Configuration ──────────────────────────────────────────────
+ssh_port: 22
+ssh_max_auth_tries: 3
+ssh_client_alive_interval: 300    # Terminate idle sessions after 5 minutes
+ssh_client_alive_count_max: 2
+ssh_allowed_users:
+  - ec2-user
+  - devops-svc                    # Service account for Ansible itself
+ssh_permit_root_login: "no"
+ssh_password_authentication: "no"
+ssh_x11_forwarding: "no"
+ssh_log_level: "VERBOSE"          # VERBOSE for audit trail (logs key fingerprints)
+ssh_ciphers:
+  - chacha20-poly1305@openssh.com
+  - aes256-gcm@openssh.com
+  - aes128-gcm@openssh.com
+ssh_macs:
+  - hmac-sha2-512-etm@openssh.com
+  - hmac-sha2-256-etm@openssh.com
+ssh_kex_algorithms:
+  - curve25519-sha256@libssh.org
+  - diffie-hellman-group14-sha256
+
+# ── Firewall ───────────────────────────────────────────────────────
+firewall_allowed_tcp_ports:
+  - "{{ ssh_port }}"
+  - "10250"    # Kubelet API (EKS requirement)
+  - "10255"    # Kubelet read-only metrics
+
+# ── Kernel Parameters ──────────────────────────────────────────────
+# These values are required for Kubernetes to function correctly
+# while also meeting security hardening requirements.
+sysctl_settings:
+  # Required for Kubernetes pod networking
+  net.ipv4.ip_forward: 1
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+  # Harden against common network attacks
+  net.ipv4.conf.all.rp_filter: 1
+  net.ipv4.conf.default.rp_filter: 1
+  net.ipv4.conf.all.accept_redirects: 0
+  net.ipv4.conf.default.accept_redirects: 0
+  net.ipv4.conf.all.secure_redirects: 0
+  net.ipv4.conf.all.send_redirects: 0
+  net.ipv4.icmp_echo_ignore_broadcasts: 1
+  net.ipv4.icmp_ignore_bogus_error_responses: 1
+  # Kernel hardening
+  kernel.dmesg_restrict: 1
+  kernel.kptr_restrict: 2
+  fs.suid_dumpable: 0
+  kernel.randomize_va_space: 2    # ASLR — full randomisation
+
+# ── Audit (auditd) ─────────────────────────────────────────────────
+auditd_max_log_file: 50           # MB per log file
+auditd_max_log_file_action: rotate
+auditd_num_logs: 5
+
+# ── Packages to remove ────────────────────────────────────────────
+packages_to_remove:
+  - telnet
+  - rsh
+  - rsh-server
+  - ypbind
+  - ypserv
+  - tftp
+  - tftp-server
+  - talk
+  - talk-server
+
+# ── Fail2Ban ──────────────────────────────────────────────────────
+fail2ban_bantime: 3600            # 1 hour ban
+fail2ban_findtime: 600            # 10 minute detection window
+fail2ban_maxretry: 3              # 3 failures triggers ban
+
+# ── Compliance metadata ────────────────────────────────────────────
+hardening_benchmark: "CIS Amazon Linux 2 Benchmark v2.0.0"
+hardening_level: "Level 1"

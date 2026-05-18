@@ -1,0 +1,36 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environment — dependencies installed inside Docker
+venv/
+.venv/
+env/
+
+# Test files
+tests/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# IDE and OS
+.idea/
+.DS_Store
+*.swp
+
+# CI/CD files
+Jenkinsfile
+.trivyignore
+*.md
+k8s/
+
+# Environment secrets
+.env
+.env.*
+!.env.example

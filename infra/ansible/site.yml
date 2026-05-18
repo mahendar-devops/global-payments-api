@@ -1,0 +1,86 @@
+---
+# infra/ansible/site.yml
+#
+# Master Playbook — Global Payments API AMI Hardening
+#
+# Applies CIS Benchmark Level 1 hardening to all EKS worker nodes
+# and any standalone EC2 instances in the platform.
+#
+# Usage:
+#   # Harden all nodes (full run)
+#   ansible-playbook -i inventory/aws_ec2.yml site.yml
+#
+#   # Harden only EKS worker nodes
+#   ansible-playbook -i inventory/aws_ec2.yml site.yml --limit "tag_Role_eks_worker"
+#
+#   # Dry run (check mode — no changes applied)
+#   ansible-playbook -i inventory/aws_ec2.yml site.yml --check --diff
+#
+#   # Run only SSH hardening tasks
+#   ansible-playbook -i inventory/aws_ec2.yml site.yml --tags ssh
+#
+#   # Run against a single host
+#   ansible-playbook -i inventory/aws_ec2.yml site.yml --limit "10.0.1.25"
+#
+# In the Jenkins pipeline, this is run against newly launched AMI instances
+# before they are baked into a golden AMI using EC2 Image Builder.
+
+- name: Harden EKS Worker Node AMIs
+  hosts: tag_Role_eks_worker
+  become: true
+  gather_facts: true
+
+  # Pre-checks before any tasks run
+  pre_tasks:
+    - name: Verify target OS is Amazon Linux 2 or RHEL 8+
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "RedHat"
+          - ansible_distribution_major_version | int >= 2
+        fail_msg: "This playbook supports Amazon Linux 2 / RHEL 8+ only. Got: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+        success_msg: "OS check passed: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+      tags: always
+
+    - name: Record pre-hardening state for audit log
+      ansible.builtin.shell: |
+        echo "Hardening started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "Host: {{ inventory_hostname }}"
+        echo "Instance ID: {{ instance_id | default('unknown') }}"
+        echo "Ansible version: $(ansible --version | head -1)"
+      register: pre_hardening_state
+      changed_when: false
+      tags: always
+
+    - name: Display pre-hardening audit info
+      ansible.builtin.debug:
+        var: pre_hardening_state.stdout_lines
+      tags: always
+
+  roles:
+    - role: linux-hardening
+      tags: hardening
+
+  post_tasks:
+    - name: Run CIS compliance check (Lynis)
+      ansible.builtin.command: lynis audit system --quiet --no-colors
+      register: lynis_output
+      changed_when: false
+      failed_when: false   # Don't fail on Lynis warnings — just record
+      when: lynis_available | default(false)
+      tags: compliance
+
+    - name: Record post-hardening completion
+      ansible.builtin.shell: |
+        echo "Hardening completed: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "Host: {{ inventory_hostname }}"
+      changed_when: false
+      tags: always
+
+- name: Harden Jenkins Nodes
+  hosts: tag_Role_jenkins
+  become: true
+  gather_facts: true
+
+  roles:
+    - role: linux-hardening
+      tags: hardening

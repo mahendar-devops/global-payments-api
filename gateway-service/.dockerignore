@@ -1,0 +1,24 @@
+# Dev dependencies — installed fresh inside Docker
+node_modules/
+
+# Test files
+tests/
+coverage/
+*.test.js
+jest.config.js
+
+# IDE and OS
+.idea/
+.DS_Store
+*.swp
+
+# CI/CD files not needed in image
+Jenkinsfile
+.trivyignore
+*.md
+k8s/
+
+# Local environment files — never in image
+.env
+.env.*
+.env.example
