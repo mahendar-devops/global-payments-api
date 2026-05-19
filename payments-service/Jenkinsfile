@@ -28,11 +28,27 @@ pipeline {
         stage('Build & Unit Test') {
             steps {
                 dir('payments-service') {
-                    sh 'chmod +x mvnw'
-                    sh './mvnw clean verify -B -q'
+                    sh '''
+                        # Fix execute permission (in case Git didn't preserve it)
+                        chmod +x ./mvnw
+
+                        # Verify Java is available
+                        java -version
+
+                        # Run Maven build and tests
+                        ./mvnw clean verify -B -q \
+                          -Dmaven.test.failure.ignore=false \
+                          -DforkCount=1 \
+                          -DreuseForks=true
+                    '''
                 }
             }
-            post { always { junit 'payments-service/target/surefire-reports/*.xml' } }
+            post {
+                always {
+                    junit allowEmptyResults: true,
+                          testResults: 'payments-service/target/surefire-reports/*.xml'
+                }
+            }
         }
 
         stage('SonarQube Analysis') {
