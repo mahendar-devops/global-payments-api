@@ -1,21 +1,18 @@
-// payments-service/Jenkinsfile
-// FIXED: All shell $ signs properly escaped inside Groovy GStrings
-
+// payments-service/Jenkinsfile — Free Tier EC2 Edition
 pipeline {
     agent any
 
     environment {
         APP_NAME    = 'payments-service'
-        IMAGE_TAG   = "${BUILD_NUMBER}-${GIT_COMMIT.take(7)}"
-        APP_SERVER  = credentials('app-server-ip')
+        IMAGE_TAG   = "${BUILD_NUMBER}-${GIT_COMMIT[0..7]}"
         SONAR_TOKEN = credentials('sonarqube-token')
-        MAVEN_OPTS  = '-Xmx512m -Xms256m'
+        APP_SERVER  = credentials('app-server-ip')
+        SSH_KEY     = credentials('app-server-ssh-key')
     }
 
     options {
         timeout(time: 30, unit: 'MINUTES')
         disableConcurrentBuilds()
-        buildDiscarder(logRotator(numToKeepStr: '10'))
     }
 
     stages {
@@ -23,7 +20,8 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
-                echo "Building: ${APP_NAME}:${IMAGE_TAG}"
+                sh 'git log -1 --pretty=format:"%h %s" > .git/commit-msg'
+                script { env.COMMIT_MSG = readFile('.git/commit-msg').trim() }
             }
         }
 
@@ -36,16 +34,15 @@ pipeline {
             post { always { junit 'payments-service/target/surefire-reports/*.xml' } }
         }
 
-        stage('SonarQube') {
+        stage('SonarQube Analysis') {
             steps {
                 dir('payments-service') {
-                    // NOTE: Uses ${SONAR_TOKEN} — Jenkins env var — OK inside """
                     sh """
-                        ./mvnw sonar:sonar -B -q \
+                        ./mvnw sonar:sonar \
                           -Dsonar.projectKey=payments-service \
                           -Dsonar.host.url=http://localhost:9000 \
                           -Dsonar.login=${SONAR_TOKEN} \
-                          -Dsonar.qualitygate.wait=false
+                          -B -q
                     """
                 }
             }
@@ -54,93 +51,59 @@ pipeline {
         stage('Docker Build') {
             steps {
                 dir('payments-service') {
-                    // ${IMAGE_TAG} and ${APP_NAME} are Jenkins env vars — OK
-                    sh """
-                        docker build \
-                          --build-arg BUILD_VERSION=${IMAGE_TAG} \
-                          -t ${APP_NAME}:${IMAGE_TAG} \
-                          -t ${APP_NAME}:latest \
-                          .
-                    """
+                    sh "docker build -t ${APP_NAME}:${IMAGE_TAG} -t ${APP_NAME}:latest ."
                 }
             }
         }
 
-        stage('Trivy Scan') {
+        stage('Trivy Security Scan') {
             steps {
                 sh """
+                    # Install Trivy if not present
+                    which trivy || curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+                    # Scan image — fail on CRITICAL or HIGH vulnerabilities
                     trivy image \
                       --exit-code 1 \
                       --severity CRITICAL,HIGH \
-                      --timeout 10m \
                       --format table \
                       ${APP_NAME}:${IMAGE_TAG}
                 """
             }
         }
 
-        stage('Deploy') {
+        stage('Deploy to App Server') {
             when { branch 'main' }
             steps {
-                sshagent(['app-server-ssh-key']) {
-                    // Step 1: Save image — uses Jenkins env vars ${APP_NAME} ${IMAGE_TAG}
+                script {
+                    // Save Docker image to a tar file
+                    sh "docker save ${APP_NAME}:${IMAGE_TAG} | gzip > ${APP_NAME}-${IMAGE_TAG}.tar.gz"
+
+                    // Copy image to app server via SSH
                     sh """
-                        docker save ${APP_NAME}:${IMAGE_TAG} | gzip > /tmp/${APP_NAME}.tar.gz
-                        echo "Image saved: /tmp/${APP_NAME}.tar.gz"
+                        scp -i ${SSH_KEY} -o StrictHostKeyChecking=no \
+                          ${APP_NAME}-${IMAGE_TAG}.tar.gz \
+                          ec2-user@${APP_SERVER}:/tmp/
                     """
 
-                    // Step 2: Transfer image to app server
+                    // Load image and restart container on app server
                     sh """
-                        scp -o StrictHostKeyChecking=no \
-                            -o ConnectTimeout=30 \
-                            /tmp/${APP_NAME}.tar.gz \
-                            ec2-user@${APP_SERVER}:/tmp/
-                        echo "Transfer complete"
+                        ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no ec2-user@${APP_SERVER} '
+                          docker load < /tmp/${APP_NAME}-${IMAGE_TAG}.tar.gz && \
+                          docker stop ${APP_NAME} 2>/dev/null || true && \
+                          docker rm ${APP_NAME} 2>/dev/null || true && \
+                          docker run -d \
+                            --name ${APP_NAME} \
+                            --restart unless-stopped \
+                            -p 8080:8080 \
+                            -e SPRING_PROFILES_ACTIVE=production \
+                            ${APP_NAME}:${IMAGE_TAG} && \
+                          echo "Deployed successfully!"
+                        '
                     """
 
-                    // Step 3: Deploy on app server
-                    // KEY FIX: Use single-quoted sh '...' so Groovy does NOT
-                    // interpolate anything — all $ signs go straight to the shell
-                    // We pass APP_NAME and IMAGE_TAG as shell variables via -v flag
-                    sh """
-                        ssh -o StrictHostKeyChecking=no \
-                            -o ConnectTimeout=30 \
-                            ec2-user@${APP_SERVER} \
-                            APP_NAME=${APP_NAME} IMAGE_TAG=${IMAGE_TAG} bash -s << 'REMOTE_SCRIPT'
-set -e
-
-echo "Loading Docker image..."
-docker load < /tmp/\${APP_NAME}.tar.gz
-
-echo "Stopping old container..."
-docker stop \${APP_NAME} 2>/dev/null || true
-docker rm   \${APP_NAME} 2>/dev/null || true
-
-echo "Reading secrets from .env file..."
-DB_PASS=\$(grep '^DB_PASSWORD=' ~/global-payments-api/.env | cut -d'=' -f2)
-JWT_SEC=\$(grep '^JWT_SECRET='  ~/global-payments-api/.env | cut -d'=' -f2)
-
-echo "Starting new container..."
-docker run -d \\
-  --name \${APP_NAME} \\
-  --restart unless-stopped \\
-  --network global-payments-api_payments-net \\
-  -p 8080:8080 \\
-  -e SPRING_PROFILES_ACTIVE=production \\
-  -e DB_URL=jdbc:postgresql://postgres:5432/payments \\
-  -e DB_USERNAME=payments_user \\
-  -e DB_PASSWORD="\${DB_PASS}" \\
-  -e JWT_SECRET="\${JWT_SEC}" \\
-  -e KAFKA_BOOTSTRAP_SERVERS=kafka:9092 \\
-  \${APP_NAME}:\${IMAGE_TAG}
-
-rm -f /tmp/\${APP_NAME}.tar.gz
-echo "Deployed \${APP_NAME}:\${IMAGE_TAG} successfully"
-REMOTE_SCRIPT
-                    """
-
-                    // Step 4: Cleanup local tar file
-                    sh "rm -f /tmp/${APP_NAME}.tar.gz"
+                    // Cleanup
+                    sh "rm -f ${APP_NAME}-${IMAGE_TAG}.tar.gz"
                 }
             }
         }
@@ -148,40 +111,19 @@ REMOTE_SCRIPT
         stage('Smoke Test') {
             when { branch 'main' }
             steps {
-                // FIX: Use single quotes sh '...' — no Groovy interpolation needed
-                // APP_SERVER is injected as env var automatically
-                sh '''
-                    echo "Waiting 60 seconds for Spring Boot to start..."
-                    sleep 60
-
-                    STATUS=$(curl -sf -o /dev/null -w '%{http_code}' \
-                      http://$APP_SERVER:8080/actuator/health 2>/dev/null || echo "000")
-
-                    echo "Health check HTTP status: $STATUS"
-
-                    if [ "$STATUS" = "200" ]; then
-                      echo "✅ payments-service is healthy"
-                    else
-                      echo "❌ Health check failed — got HTTP $STATUS"
-                      exit 1
-                    fi
-                '''
+                sh """
+                    sleep 30  # Wait for Spring Boot to start
+                    STATUS=\$(curl -sf -o /dev/null -w "%{http_code}" \
+                      http://${APP_SERVER}:8080/actuator/health 2>/dev/null || echo "000")
+                    echo "Health check: HTTP \$STATUS"
+                    [ "\$STATUS" = "200" ] || exit 1
+                """
             }
         }
     }
 
     post {
-        always {
-            sh """
-                docker rmi ${APP_NAME}:${IMAGE_TAG} 2>/dev/null || true
-                docker image prune -f || true
-            """
-        }
-        success {
-            echo "✅ ${APP_NAME} deployed successfully — ${IMAGE_TAG}"
-        }
-        failure {
-            echo "❌ ${APP_NAME} pipeline FAILED — Stage: ${STAGE_NAME}"
-        }
+        success { echo "✅ Pipeline PASSED: ${env.COMMIT_MSG}" }
+        failure { echo "❌ Pipeline FAILED at stage: ${env.STAGE_NAME}" }
     }
 }
