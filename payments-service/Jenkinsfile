@@ -28,6 +28,7 @@ pipeline {
         stage('Build & Unit Test') {
             steps {
                 dir('payments-service') {
+                    sh 'chmod +x mvnw'
                     sh './mvnw clean verify -B -q'
                 }
             }
