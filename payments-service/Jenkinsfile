@@ -30,21 +30,10 @@ pipeline {
         stage('Build & Unit Test') {
             steps {
                 dir('payments-service') {
-                    sh '''
-                        chmod +x ./mvnw
-                        ./mvnw clean verify -B -q \
-                          -Dmaven.test.failure.ignore=false \
-                          -DforkCount=1 \
-                          -DreuseForks=true
-                    '''
+                    sh './mvnw clean verify -B -q'
                 }
             }
-            post {
-                always {
-                    junit allowEmptyResults: true,
-                          testResults: 'payments-service/target/surefire-reports/*.xml'
-                }
-            }
+            post { always { junit 'payments-service/target/surefire-reports/*.xml' } }
         }
 
         stage('SonarQube') {
